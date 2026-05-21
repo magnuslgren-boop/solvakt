@@ -1,0 +1,187 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "hardware/uart.h"
+#include "hardware/watchdog.h"
+
+#define UART_ID         uart0
+#define UART_TX_PIN     0
+#define UART_RX_PIN     1
+#define BAUD_RATE       115200
+
+#define RELAY1_PIN      2
+#define RELAY2_PIN      3
+#define LED_PIN         25  // Built-in LED on Pico
+
+// Thresholds in milliwatts to avoid float comparisons
+#define THRESHOLD_BOTH_MW   6500
+#define THRESHOLD_ONE_MW    3500
+#define THRESHOLD_OFF_MW     500
+
+#define NO_DATA_TIMEOUT_MS  300000u  // 5 minutes
+#define WATCHDOG_MS           8000u  // Max for RP2040 is ~8388ms
+
+#define BLINK_SLOW_MS   500u  // 1 blink/sec  = one patron active
+#define BLINK_FAST_MS   125u  // 4 blinks/sec = both patrons active
+
+#define LINE_BUF_SIZE   128
+
+typedef enum { STATE_OFF, STATE_ONE, STATE_BOTH } relay_state_t;
+
+static relay_state_t relay_state = STATE_OFF;
+static char line_buf[LINE_BUF_SIZE];
+static int  line_pos = 0;
+
+static const char *state_name(relay_state_t s) {
+    switch (s) {
+        case STATE_OFF:  return "OFF";
+        case STATE_ONE:  return "ONE";
+        case STATE_BOTH: return "BOTH";
+    }
+    return "?";
+}
+
+static void set_relays(relay_state_t new_state) {
+    if (new_state == relay_state) return;
+    switch (new_state) {
+        case STATE_OFF:
+            gpio_put(RELAY1_PIN, 1);
+            gpio_put(RELAY2_PIN, 1);
+            break;
+        case STATE_ONE:
+            gpio_put(RELAY1_PIN, 0);
+            gpio_put(RELAY2_PIN, 1);
+            break;
+        case STATE_BOTH:
+            gpio_put(RELAY1_PIN, 0);
+            gpio_put(RELAY2_PIN, 0);
+            break;
+    }
+    printf("Relay: %s -> %s\n", state_name(relay_state), state_name(new_state));
+    relay_state = new_state;
+}
+
+// Parses a line looking for: 1-0:2.7.0(X.XXX*kW)
+// Returns true and sets *mw_out if found.
+static bool parse_export_power(const char *line, int *mw_out) {
+    const char *p = strstr(line, "1-0:2.7.0(");
+    if (!p) return false;
+    p += 10;
+    char *end;
+    float kw = strtof(p, &end);
+    if (end == p) return false;
+    *mw_out = (int)(kw * 1000.0f + 0.5f);
+    return true;
+}
+
+static void process_power(int export_mw) {
+    if (export_mw >= THRESHOLD_BOTH_MW) { set_relays(STATE_BOTH); return; }
+    if (export_mw >= THRESHOLD_ONE_MW)  { set_relays(STATE_ONE);  return; }
+    if (export_mw <= THRESHOLD_OFF_MW)  { set_relays(STATE_OFF); }
+    // Between 0.5 and 3.5 kW: hysteresis zone, keep current state
+}
+
+static void update_led(bool watchdog_rebooted, uint32_t now_ms,
+                        uint32_t *led_toggle_ms, bool *led_on) {
+    if (watchdog_rebooted) {
+        gpio_put(LED_PIN, 1);  // Solid = watchdog reset, needs attention
+        return;
+    }
+    switch (relay_state) {
+        case STATE_OFF:
+            gpio_put(LED_PIN, 0);
+            break;
+        case STATE_ONE:
+            if (now_ms - *led_toggle_ms >= BLINK_SLOW_MS) {
+                *led_on = !*led_on;
+                gpio_put(LED_PIN, *led_on);
+                *led_toggle_ms = now_ms;
+            }
+            break;
+        case STATE_BOTH:
+            if (now_ms - *led_toggle_ms >= BLINK_FAST_MS) {
+                *led_on = !*led_on;
+                gpio_put(LED_PIN, *led_on);
+                *led_toggle_ms = now_ms;
+            }
+            break;
+    }
+}
+
+int main(void) {
+    bool watchdog_rebooted = watchdog_caused_reboot();
+
+    stdio_init_all();
+
+    // Relays: write value before setting direction to avoid output glitch on startup
+    gpio_init(RELAY1_PIN);
+    gpio_put(RELAY1_PIN, 1);
+    gpio_set_dir(RELAY1_PIN, GPIO_OUT);
+
+    gpio_init(RELAY2_PIN);
+    gpio_put(RELAY2_PIN, 1);
+    gpio_set_dir(RELAY2_PIN, GPIO_OUT);
+
+    // LED
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 0);
+
+    // UART0 on GP0 (TX) / GP1 (RX), 115200 8N1, no flow control
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+    uart_set_hw_flow(UART_ID, false, false);
+    uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
+
+    watchdog_enable(WATCHDOG_MS, true);
+
+    if (watchdog_rebooted) printf("*** WATCHDOG REBOOT ***\n");
+    printf("Solvakt started. Thresholds: off=%.1f one=%.1f both=%.1f kW\n", THRESHOLD_OFF_MW / 1000.0f, THRESHOLD_ONE_MW / 1000.0f, THRESHOLD_BOTH_MW / 1000.0f);
+
+    uint32_t last_data_ms  = to_ms_since_boot(get_absolute_time());
+    uint32_t led_toggle_ms = 0;
+    bool     led_on        = false;
+
+    while (true) {
+        watchdog_update();
+
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+        // --- LED ---
+        update_led(watchdog_rebooted, now_ms, &led_toggle_ms, &led_on);
+
+        // --- No-data timeout: turn everything off if meter goes silent ---
+        if (now_ms - last_data_ms >= NO_DATA_TIMEOUT_MS) {
+            printf("No data for %u s, turning off\n", NO_DATA_TIMEOUT_MS / 1000);
+            set_relays(STATE_OFF);
+            last_data_ms = now_ms;
+        }
+
+        // --- Drain UART FIFO ---
+        while (uart_is_readable(UART_ID)) {
+            char c = uart_getc(UART_ID);
+            if (c == '\r' || c == '\n') {
+                if (line_pos > 0) {
+                    line_buf[line_pos] = '\0';
+                    int export_mw;
+                    if (parse_export_power(line_buf, &export_mw)) {
+                        last_data_ms = now_ms;
+                        printf("Export: %d.%03d kW\n", export_mw / 1000, export_mw % 1000);
+                        process_power(export_mw);
+                    }
+                    line_pos = 0;
+                }
+                continue;
+            }
+            if (line_pos < LINE_BUF_SIZE - 1) {
+                line_buf[line_pos++] = c;
+                continue;
+            }
+            line_pos = 0;  // Line too long, discard and resync
+        }
+
+        sleep_ms(1);
+    }
+}
