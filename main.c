@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "pico/stdlib.h"
@@ -15,12 +16,13 @@
 #define LED_PIN         25  // Built-in LED on Pico
 
 // Thresholds in milliwatts to avoid float comparisons
-#define THRESHOLD_BOTH_MW   6500
-#define THRESHOLD_ONE_MW    3500
-#define THRESHOLD_OFF_MW     500
+#define THRESHOLD_STEP_UP_MW    4000  // Step relay up one level when export exceeds this
+#define THRESHOLD_STEP_DOWN_MW   500  // Step relay to OFF immediately when export falls below this
+
+#define STEP_UP_INTERVAL_MS    10000u  // Minimum ms between step-ups (matches HAN update rate)
 
 #define NO_DATA_TIMEOUT_MS  300000u  // 5 minutes
-#define WATCHDOG_MS           8000u  // Max for RP2040 is ~8388ms
+#define WATCHDOG_MS           8000u  // Max for RP2350 is ~8388ms
 
 #define BLINK_SLOW_MS   500u  // 1 blink/sec  = one patron active
 #define BLINK_FAST_MS   125u  // 4 blinks/sec = both patrons active
@@ -32,6 +34,14 @@ typedef enum { STATE_OFF, STATE_ONE, STATE_BOTH } relay_state_t;
 static relay_state_t relay_state = STATE_OFF;
 static char line_buf[LINE_BUF_SIZE];
 static int  line_pos = 0;
+
+static void usb_printf(const char *fmt, ...) {
+    if (!stdio_usb_connected()) return;
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
 
 static const char *state_name(relay_state_t s) {
     switch (s) {
@@ -46,19 +56,19 @@ static void set_relays(relay_state_t new_state) {
     if (new_state == relay_state) return;
     switch (new_state) {
         case STATE_OFF:
-            gpio_put(RELAY1_PIN, 1);
-            gpio_put(RELAY2_PIN, 1);
-            break;
-        case STATE_ONE:
-            gpio_put(RELAY1_PIN, 0);
-            gpio_put(RELAY2_PIN, 1);
-            break;
-        case STATE_BOTH:
             gpio_put(RELAY1_PIN, 0);
             gpio_put(RELAY2_PIN, 0);
             break;
+        case STATE_ONE:
+            gpio_put(RELAY1_PIN, 1);
+            gpio_put(RELAY2_PIN, 0);
+            break;
+        case STATE_BOTH:
+            gpio_put(RELAY1_PIN, 1);
+            gpio_put(RELAY2_PIN, 1);
+            break;
     }
-    printf("Relay: %s -> %s\n", state_name(relay_state), state_name(new_state));
+    usb_printf("Relay: %s -> %s\n", state_name(relay_state), state_name(new_state));
     relay_state = new_state;
 }
 
@@ -75,19 +85,24 @@ static bool parse_export_power(const char *line, int *mw_out) {
     return true;
 }
 
-static void process_power(int export_mw) {
-    if (export_mw >= THRESHOLD_BOTH_MW) { set_relays(STATE_BOTH); return; }
-    if (export_mw >= THRESHOLD_ONE_MW)  { set_relays(STATE_ONE);  return; }
-    if (export_mw <= THRESHOLD_OFF_MW)  { set_relays(STATE_OFF); }
-    // Between 0.5 and 3.5 kW: hysteresis zone, keep current state
-}
+static void process_power(int export_mw, uint32_t now_ms) {
+    static uint32_t last_step_up_ms = 0;
 
-static void update_led(bool watchdog_rebooted, uint32_t now_ms,
-                        uint32_t *led_toggle_ms, bool *led_on) {
-    if (watchdog_rebooted) {
-        gpio_put(LED_PIN, 1);  // Solid = watchdog reset, needs attention
+    if (export_mw < THRESHOLD_STEP_DOWN_MW) {
+        set_relays(STATE_OFF);
         return;
     }
+    
+    if (export_mw >= THRESHOLD_STEP_UP_MW && relay_state != STATE_BOTH) {
+        if (now_ms - last_step_up_ms >= STEP_UP_INTERVAL_MS) {
+            relay_state_t next = (relay_state == STATE_OFF) ? STATE_ONE : STATE_BOTH;
+            set_relays(next);
+            last_step_up_ms = now_ms;
+        }
+    }
+}
+
+static void update_led(uint32_t now_ms, uint32_t *led_toggle_ms, bool *led_on) {
     switch (relay_state) {
         case STATE_OFF:
             gpio_put(LED_PIN, 0);
@@ -116,11 +131,11 @@ int main(void) {
 
     // Relays: write value before setting direction to avoid output glitch on startup
     gpio_init(RELAY1_PIN);
-    gpio_put(RELAY1_PIN, 1);
+    gpio_put(RELAY1_PIN, 0);
     gpio_set_dir(RELAY1_PIN, GPIO_OUT);
 
     gpio_init(RELAY2_PIN);
-    gpio_put(RELAY2_PIN, 1);
+    gpio_put(RELAY2_PIN, 0);
     gpio_set_dir(RELAY2_PIN, GPIO_OUT);
 
     // LED
@@ -135,10 +150,18 @@ int main(void) {
     uart_set_hw_flow(UART_ID, false, false);
     uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
 
+    for (int i = 0; i < 10; i++) {
+        gpio_put(LED_PIN, 1);
+        sleep_ms(500);
+        gpio_put(LED_PIN, 0);
+        sleep_ms(500);
+    }
+
     watchdog_enable(WATCHDOG_MS, true);
 
-    if (watchdog_rebooted) printf("*** WATCHDOG REBOOT ***\n");
-    printf("Solvakt started. Thresholds: off=%.1f one=%.1f both=%.1f kW\n", THRESHOLD_OFF_MW / 1000.0f, THRESHOLD_ONE_MW / 1000.0f, THRESHOLD_BOTH_MW / 1000.0f);
+    if (watchdog_rebooted) usb_printf("*** WATCHDOG REBOOT ***\n");
+    usb_printf("Solvakt started. step_up=%.1f kW step_down=%.1f kW interval=%u s\n",
+               THRESHOLD_STEP_UP_MW / 1000.0f, THRESHOLD_STEP_DOWN_MW / 1000.0f, STEP_UP_INTERVAL_MS / 1000u);
 
     uint32_t last_data_ms  = to_ms_since_boot(get_absolute_time());
     uint32_t led_toggle_ms = 0;
@@ -150,11 +173,11 @@ int main(void) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
         // --- LED ---
-        update_led(watchdog_rebooted, now_ms, &led_toggle_ms, &led_on);
+        update_led(now_ms, &led_toggle_ms, &led_on);
 
         // --- No-data timeout: turn everything off if meter goes silent ---
         if (now_ms - last_data_ms >= NO_DATA_TIMEOUT_MS) {
-            printf("No data for %u s, turning off\n", NO_DATA_TIMEOUT_MS / 1000);
+            usb_printf("No data for %u s, turning off\n", NO_DATA_TIMEOUT_MS / 1000);
             set_relays(STATE_OFF);
             last_data_ms = now_ms;
         }
@@ -168,8 +191,8 @@ int main(void) {
                     int export_mw;
                     if (parse_export_power(line_buf, &export_mw)) {
                         last_data_ms = now_ms;
-                        printf("Export: %d.%03d kW\n", export_mw / 1000, export_mw % 1000);
-                        process_power(export_mw);
+                        usb_printf("Export: %d.%03d kW\n", export_mw / 1000, export_mw % 1000);
+                        process_power(export_mw, now_ms);
                     }
                     line_pos = 0;
                 }
