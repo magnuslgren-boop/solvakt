@@ -1,7 +1,7 @@
 # Solvakt
 
-Firmware för Raspberry Pi Pico (RP2040) som styr två reläer baserat på aktuell solelsexport.
-Data läses från en elmätare via UART (P1-port, 115200 baud).
+Firmware för Raspberry Pi Pico 2 (RP2350) som styr två reläer baserat på aktuell solelsexport.
+Data läses från en elmätare via UART (HAN-port, 115200 baud).
 
 ## Hårdvara
 
@@ -9,20 +9,31 @@ Data läses från en elmätare via UART (P1-port, 115200 baud).
 |-----|----------|
 | GP0 | UART TX |
 | GP1 | UART RX (data från elmätare) |
-| GP2 | Relä 1 |
-| GP3 | Relä 2 |
+| GP2 | Relä 1 (aktiv hög) |
+| GP3 | Relä 2 (aktiv hög) |
 | GP25 | Inbyggd LED (statusindikator) |
 
-## Logik
+## Relälogik
 
-| Exporteffekt | Reläer | LED |
-|---|---|---|
-| > 6,5 kW | Båda på | Blinkar snabbt (4 Hz) |
-| 3,5 – 6,5 kW | Relä 1 på | Blinkar långsamt (1 Hz) |
-| < 0,5 kW | Båda av | Släckt |
-| 0,5 – 3,5 kW | Hystereszonen, behåller nuvarande läge | — |
+Reläerna styrs i tre steg: OFF → ONE → BOTH. Steg uppåt sker max en gång per 10 sekunder.
 
-Ingen data på 5 minuter stänger av båda reläerna. Watchdog-reset indikeras med fast lysande LED.
+| State | Relä 1 | Relä 2 | Villkor |
+|-------|--------|--------|---------|
+| OFF   | Av     | Av     | Startläge, eller export < 0,5 kW |
+| ONE   | På     | Av     | Export ≥ 4,0 kW i minst 10 s från OFF |
+| BOTH  | På     | På     | Export ≥ 4,0 kW i minst 10 s från ONE |
+
+- Nedsteg till OFF sker **direkt** när export understiger 0,5 kW
+- Uppsteg sker **ett steg i taget** med minst 10 sekunders mellanrum
+- Ingen data på 5 minuter stänger av båda reläerna
+
+## LED
+
+| State | Blinkmönster |
+|-------|-------------|
+| OFF   | Blinkar var 2:a sekund |
+| ONE   | Blinkar 1 Hz |
+| BOTH  | Blinkar 4 Hz |
 
 ## Bygga
 

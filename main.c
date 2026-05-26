@@ -24,6 +24,7 @@
 #define NO_DATA_TIMEOUT_MS  300000u  // 5 minutes
 #define WATCHDOG_MS           8000u  // Max for RP2350 is ~8388ms
 
+#define BLINK_IDLE_MS  2000u  // 1 blink/4sec = idle, no patrons active
 #define BLINK_SLOW_MS   500u  // 1 blink/sec  = one patron active
 #define BLINK_FAST_MS   125u  // 4 blinks/sec = both patrons active
 
@@ -54,26 +55,21 @@ static const char *state_name(relay_state_t s) {
 
 static void set_relays(relay_state_t new_state) {
     if (new_state == relay_state) return;
-    switch (new_state) {
-        case STATE_OFF:
-            gpio_put(RELAY1_PIN, 0);
-            gpio_put(RELAY2_PIN, 0);
-            break;
-        case STATE_ONE:
-            gpio_put(RELAY1_PIN, 1);
-            gpio_put(RELAY2_PIN, 0);
-            break;
-        case STATE_BOTH:
-            gpio_put(RELAY1_PIN, 1);
-            gpio_put(RELAY2_PIN, 1);
-            break;
-    }
+
+    static const struct { int r1; int r2; } relay_map[] = {
+        [STATE_OFF]  = { 0, 0 },
+        [STATE_ONE]  = { 1, 0 },
+        [STATE_BOTH] = { 1, 1 },
+    };
+    gpio_put(RELAY1_PIN, relay_map[new_state].r1);
+    gpio_put(RELAY2_PIN, relay_map[new_state].r2);
+    
     usb_printf("Relay: %s -> %s\n", state_name(relay_state), state_name(new_state));
+    
     relay_state = new_state;
 }
 
 // Parses a line looking for: 1-0:2.7.0(X.XXX*kW)
-// Returns true and sets *mw_out if found.
 static bool parse_export_power(const char *line, int *mw_out) {
     const char *p = strstr(line, "1-0:2.7.0(");
     if (!p) return false;
@@ -103,24 +99,17 @@ static void process_power(int export_mw, uint32_t now_ms) {
 }
 
 static void update_led(uint32_t now_ms, uint32_t *led_toggle_ms, bool *led_on) {
-    switch (relay_state) {
-        case STATE_OFF:
-            gpio_put(LED_PIN, 0);
-            break;
-        case STATE_ONE:
-            if (now_ms - *led_toggle_ms >= BLINK_SLOW_MS) {
-                *led_on = !*led_on;
-                gpio_put(LED_PIN, *led_on);
-                *led_toggle_ms = now_ms;
-            }
-            break;
-        case STATE_BOTH:
-            if (now_ms - *led_toggle_ms >= BLINK_FAST_MS) {
-                *led_on = !*led_on;
-                gpio_put(LED_PIN, *led_on);
-                *led_toggle_ms = now_ms;
-            }
-            break;
+    static const uint32_t blink_ms[] = {
+        [STATE_OFF]  = BLINK_IDLE_MS,
+        [STATE_ONE]  = BLINK_SLOW_MS,
+        [STATE_BOTH] = BLINK_FAST_MS,
+    };
+
+    uint32_t interval = blink_ms[relay_state];
+    if (now_ms - *led_toggle_ms >= interval) {
+        *led_on = !*led_on;
+        gpio_put(LED_PIN, *led_on);
+        *led_toggle_ms = now_ms;
     }
 }
 
@@ -150,6 +139,7 @@ int main(void) {
     uart_set_hw_flow(UART_ID, false, false);
     uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
 
+    // -- 10 seconds idle at boot to setup uart and HAN-connector when using USB --
     for (int i = 0; i < 10; i++) {
         gpio_put(LED_PIN, 1);
         sleep_ms(500);
@@ -160,8 +150,7 @@ int main(void) {
     watchdog_enable(WATCHDOG_MS, true);
 
     if (watchdog_rebooted) usb_printf("*** WATCHDOG REBOOT ***\n");
-    usb_printf("Solvakt started. step_up=%.1f kW step_down=%.1f kW interval=%u s\n",
-               THRESHOLD_STEP_UP_MW / 1000.0f, THRESHOLD_STEP_DOWN_MW / 1000.0f, STEP_UP_INTERVAL_MS / 1000u);
+    usb_printf("Solvakt started. step_up=%.1f kW step_down=%.1f kW interval=%u s\n", THRESHOLD_STEP_UP_MW / 1000.0f, THRESHOLD_STEP_DOWN_MW / 1000.0f, STEP_UP_INTERVAL_MS / 1000u);
 
     uint32_t last_data_ms  = to_ms_since_boot(get_absolute_time());
     uint32_t led_toggle_ms = 0;
