@@ -53,7 +53,7 @@ static const char *state_name(relay_state_t s) {
     return "?";
 }
 
-static void set_relays(relay_state_t new_state) {
+static void set_relays_and_state(relay_state_t new_state) {
     if (new_state == relay_state) return;
 
     static const struct { int r1; int r2; } relay_map[] = {
@@ -84,17 +84,16 @@ static bool parse_export_power(const char *line, int *mw_out) {
 static void process_power(int export_mw, uint32_t now_ms) {
     static uint32_t last_state_update_ms = 0;
 
-    if (export_mw < THRESHOLD_STEP_DOWN_MW && relay_state > STATE_OFF) {
-        set_relays((relay_state_t)(relay_state - 1));
-        return;
-    }
+    relay_state_t nextState = 
+        export_mw < THRESHOLD_STEP_DOWN_MW && relay_state > STATE_OFF ?  (relay_state_t)(relay_state - 1) : 
+        export_mw >= THRESHOLD_STEP_UP_MW && relay_state < STATE_BOTH ?  (relay_state_t)(relay_state + 1) : 
+        relay_state;
 
-    if (now_ms - last_state_update_ms < STEP_INTERVAL_MS) return;
+    if (nextState == relay_state) return;
+    if (nextState > relay_state && (now_ms - last_state_update_ms < STEP_INTERVAL_MS)) return;
 
-    if (export_mw >= THRESHOLD_STEP_UP_MW && relay_state < STATE_BOTH) {
-        set_relays((relay_state_t)(relay_state + 1));
-        last_state_update_ms = now_ms;
-    }
+    set_relays_and_state(nextState);
+    last_state_update_ms = now_ms;
 }
 
 static void update_led(uint32_t now_ms, uint32_t *led_toggle_ms, bool *led_on) {
@@ -166,7 +165,7 @@ int main(void) {
         // --- No-data timeout: turn everything off if meter goes silent ---
         if (now_ms - last_data_ms >= NO_DATA_TIMEOUT_MS) {
             usb_printf("No data for %u s, turning off\n", NO_DATA_TIMEOUT_MS / 1000);
-            set_relays(STATE_OFF);
+            set_relays_and_state(STATE_OFF);
             last_data_ms = now_ms;
         }
 
