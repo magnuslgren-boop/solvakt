@@ -16,10 +16,10 @@
 #define LED_PIN         25  // Built-in LED on Pico
 
 // Thresholds in milliwatts to avoid float comparisons
-#define THRESHOLD_STEP_UP_MW    4000  // Step relay up one level when export exceeds this
-#define THRESHOLD_STEP_DOWN_MW   500  // Step relay to OFF immediately when export falls below this
+#define THRESHOLD_STEP_UP_MW    3500  // Step relay up one level when export exceeds this
+#define THRESHOLD_STEP_DOWN_MW   300  // Step relay to OFF immediately when export falls below this
 
-#define STEP_UP_INTERVAL_MS    10000u  // Minimum ms between step-ups (matches HAN update rate)
+#define STEP_INTERVAL_MS    10000u  // Minimum ms between step changes (matches HAN update rate)
 
 #define NO_DATA_TIMEOUT_MS  300000u  // 5 minutes
 #define WATCHDOG_MS           8000u  // Max for RP2350 is ~8388ms
@@ -82,19 +82,18 @@ static bool parse_export_power(const char *line, int *mw_out) {
 }
 
 static void process_power(int export_mw, uint32_t now_ms) {
-    static uint32_t last_step_up_ms = 0;
+    static uint32_t last_state_update_ms = 0;
 
-    if (export_mw < THRESHOLD_STEP_DOWN_MW) {
-        set_relays(STATE_OFF);
+    if (export_mw < THRESHOLD_STEP_DOWN_MW && relay_state > STATE_OFF) {
+        set_relays((relay_state_t)(relay_state - 1));
         return;
     }
-    
-    if (export_mw >= THRESHOLD_STEP_UP_MW && relay_state != STATE_BOTH) {
-        if (now_ms - last_step_up_ms >= STEP_UP_INTERVAL_MS) {
-            relay_state_t next = (relay_state == STATE_OFF) ? STATE_ONE : STATE_BOTH;
-            set_relays(next);
-            last_step_up_ms = now_ms;
-        }
+
+    if (now_ms - last_state_update_ms < STEP_INTERVAL_MS) return;
+
+    if (export_mw >= THRESHOLD_STEP_UP_MW && relay_state < STATE_BOTH) {
+        set_relays((relay_state_t)(relay_state + 1));
+        last_state_update_ms = now_ms;
     }
 }
 

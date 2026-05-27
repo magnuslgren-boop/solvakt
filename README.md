@@ -15,23 +15,23 @@ Data läses från en elmätare via UART (HAN-port, 115200 baud).
 
 ## Relälogik
 
-Reläerna styrs i tre steg: OFF → ONE → BOTH. Steg uppåt sker max en gång per 10 sekunder.
+Reläerna styrs i tre steg: OFF → ONE → BOTH.
 
 | State | Relä 1 | Relä 2 | Villkor |
 |-------|--------|--------|---------|
-| OFF   | Av     | Av     | Startläge, eller export < 0,5 kW |
-| ONE   | På     | Av     | Export ≥ 4,0 kW i minst 10 s från OFF |
-| BOTH  | På     | På     | Export ≥ 4,0 kW i minst 10 s från ONE |
+| OFF   | Av     | Av     | Startläge. Uppsteg när export ≥ 3,5 kW |
+| ONE   | På     | Av     | Nedsteg när export < 0,3 kW, uppsteg när export ≥ 3,5 kW |
+| BOTH  | På     | På     | Nedsteg när export < 0,3 kW |
 
-- Nedsteg till OFF sker **direkt** när export understiger 0,5 kW
-- Uppsteg sker **ett steg i taget** med minst 10 sekunders mellanrum
+- **Uppsteg** sker ett steg i taget med minst 10 sekunders mellanrum
+- **Nedsteg** sker ett steg i taget direkt utan fördröjning
 - Ingen data på 5 minuter stänger av båda reläerna
 
 ## LED
 
 | State | Blinkmönster |
 |-------|-------------|
-| OFF   | Blinkar var 2:a sekund |
+| OFF   | Blinkar var 4:e sekund |
 | ONE   | Blinkar 1 Hz |
 | BOTH  | Blinkar 4 Hz |
 
