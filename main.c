@@ -45,12 +45,12 @@ static void usb_printf(const char *fmt, ...) {
 }
 
 static const char *state_name(relay_state_t s) {
-    switch (s) {
-        case STATE_OFF:  return "OFF";
-        case STATE_ONE:  return "ONE";
-        case STATE_BOTH: return "BOTH";
-    }
-    return "?";
+    static const char *names[] = {
+        [STATE_OFF]  = "OFF",
+        [STATE_ONE]  = "ONE",
+        [STATE_BOTH] = "BOTH",
+    };
+    return names[s];
 }
 
 static void set_relays_and_state(relay_state_t new_state) {
@@ -111,9 +111,7 @@ static void update_led(uint32_t now_ms, uint32_t *led_toggle_ms, bool *led_on) {
     }
 }
 
-int main(void) {
-    bool watchdog_rebooted = watchdog_caused_reboot();
-
+static void boot_sequence() {
     stdio_init_all();
 
     // Relays: write value before setting direction to avoid output glitch on startup
@@ -146,9 +144,15 @@ int main(void) {
     }
 
     watchdog_enable(WATCHDOG_MS, true);
+}
+
+int main(void) {
+    bool watchdog_rebooted = watchdog_caused_reboot();
+
+    boot_sequence();
 
     if (watchdog_rebooted) usb_printf("*** WATCHDOG REBOOT ***\n");
-    usb_printf("Solvakt started. step_up=%.1f kW step_down=%.1f kW interval=%u s\n", THRESHOLD_STEP_UP_MW / 1000.0f, THRESHOLD_STEP_DOWN_MW / 1000.0f, STEP_UP_INTERVAL_MS / 1000u);
+    usb_printf("Solvakt started. step_up=%.1f kW step_down=%.1f kW interval=%u s\n", THRESHOLD_STEP_UP_MW / 1000.0f, THRESHOLD_STEP_DOWN_MW / 1000.0f, STEP_INTERVAL_MS / 1000u);
 
     uint32_t last_data_ms  = to_ms_since_boot(get_absolute_time());
     uint32_t led_toggle_ms = 0;
