@@ -17,9 +17,9 @@
 
 // Thresholds in milliwatts to avoid float comparisons
 #define THRESHOLD_STEP_UP_MW    3500  // Step relay up one level when export exceeds this
-#define THRESHOLD_STEP_DOWN_MW   300  // Step relay to OFF immediately when export falls below this
+#define THRESHOLD_STEP_DOWN_MW   100  // Step relay to OFF immediately when export falls below this
 
-#define STEP_INTERVAL_MS    10000u  // Minimum ms between step changes (matches HAN update rate)
+#define STEP_INTERVAL_MS    30000u  // Minimum ms between step changes (matches HAN update rate)
 
 #define NO_DATA_TIMEOUT_MS  300000u  // 5 minutes
 #define WATCHDOG_MS           8000u  // Max for RP2350 is ~8388ms
@@ -69,7 +69,6 @@ static void set_relays_and_state(relay_state_t new_state) {
     relay_state = new_state;
 }
 
-// Parses a line looking for: 1-0:2.7.0(X.XXX*kW)
 static bool parse_export_power(const char *line, int *mw_out) {
     const char *p = strstr(line, "1-0:2.7.0(");
     if (!p) return false;
